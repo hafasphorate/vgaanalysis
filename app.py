@@ -1,4 +1,5 @@
 import os
+import glob
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,7 +9,13 @@ st.set_page_config(page_title="Multi-VGA Analysis Dashboard", layout="wide")
 st.title("📊 Multi-VGA Analysis & Spatial Metric Dashboard")
 
 # -----------------------------------------------------------------------------
-# 1. HELPER FUNCTIONS
+# 1. PATHS FOR DEFAULT DATA
+# -----------------------------------------------------------------------------
+DEFAULT_DATA_DIR = "default_data"
+DEFAULT_IMAGE_DIR = "default_images"
+
+# -----------------------------------------------------------------------------
+# 2. HELPER FUNCTIONS
 # -----------------------------------------------------------------------------
 def parse_filename(filename):
     """Parses 'Northshore-L1.csv' -> Mall: 'Northshore', Level: 'L1'"""
@@ -89,20 +96,10 @@ def draw_overlay_chart(filtered_dict, comp_metric, chart_style="Line (Normalized
     plt.tight_layout()
     return fig
 
-def process_vga_uploaded_file(uploaded_file):
-    try:
-        df = pd.read_csv(uploaded_file)
-        if len(df.columns) <= 1:
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, sep=r'\s+|,|\t', engine='python')
-    except Exception as e:
-        return None, None, f"Error reading file: {e}"
-        
-    filename = uploaded_file.name
+def process_dataframe(df, filename):
     num_cols = df.select_dtypes(include=[np.number]).columns
-    
     if len(num_cols) == 0:
-        return None, df, "No numerical columns detected in CSV."
+        return None, "No numerical columns detected."
 
     mall, level, base_name = parse_filename(filename)
 
@@ -147,49 +144,85 @@ def process_vga_uploaded_file(uploaded_file):
         stats[f"{col}_PctPoints_In_Upper_25pct_Range"] = ((series >= r75_high).sum() / n_total) * 100 if n_total > 0 else 0
         stats[f"{col}_PctPoints_In_Upper_10pct_Range"] = ((series >= r90_high).sum() / n_total) * 100 if n_total > 0 else 0
         
-    return stats, df, None
+    return stats, None
 
 # -----------------------------------------------------------------------------
-# 2. SIDEBAR FILE UPLOADERS FOR CLOUD DEPLOYMENT
+# 3. SIDEBAR INPUTS & FILE HANDLING
 # -----------------------------------------------------------------------------
-st.sidebar.header("📁 Upload VGA Data & Images")
+st.sidebar.header("📁 Data & Image Inputs")
 
 uploaded_csvs = st.sidebar.file_uploader(
-    "Upload VGA CSV Files", 
+    "Upload Custom CSV Files (Optional)", 
     type=["csv", "txt"], 
     accept_multiple_files=True
 )
 
 uploaded_images = st.sidebar.file_uploader(
-    "Upload Matching VGA PNG Images", 
+    "Upload Custom Images (Optional)", 
     type=["png", "jpg", "jpeg"], 
     accept_multiple_files=True
 )
 
+summary_list = []
+data_dict = {}
 image_dict = {}
+
+# --- A. HANDLE CSV DATA (Uploaded vs Default) ---
+if uploaded_csvs:
+    st.sidebar.info("Using uploaded CSV files.")
+    for uploaded_csv in uploaded_csvs:
+        try:
+            df = pd.read_csv(uploaded_csv)
+            if len(df.columns) <= 1:
+                uploaded_csv.seek(0)
+                df = pd.read_csv(uploaded_csv, sep=r'\s+|,|\t', engine='python')
+            
+            stats, err = process_dataframe(df, uploaded_csv.name)
+            if not err:
+                summary_list.append(stats)
+                mall, level, base_name = parse_filename(uploaded_csv.name)
+                data_dict[(mall, level)] = {
+                    "filename": uploaded_csv.name,
+                    "base_name": base_name,
+                    "df": df
+                }
+        except Exception as e:
+            st.sidebar.error(f"Error loading {uploaded_csv.name}: {e}")
+
+elif os.path.exists(DEFAULT_DATA_DIR):
+    default_csv_paths = glob.glob(os.path.join(DEFAULT_DATA_DIR, "*.csv")) + glob.glob(os.path.join(DEFAULT_DATA_DIR, "*.txt"))
+    if default_csv_paths:
+        st.sidebar.success(f"Loaded {len(default_csv_paths)} default CSV file(s).")
+        for fp in default_csv_paths:
+            try:
+                df = pd.read_csv(fp)
+                if len(df.columns) <= 1:
+                    df = pd.read_csv(fp, sep=r'\s+|,|\t', engine='python')
+                
+                filename = os.path.basename(fp)
+                stats, err = process_dataframe(df, filename)
+                if not err:
+                    summary_list.append(stats)
+                    mall, level, base_name = parse_filename(filename)
+                    data_dict[(mall, level)] = {
+                        "filename": filename,
+                        "base_name": base_name,
+                        "df": df
+                    }
+            except Exception as e:
+                st.sidebar.error(f"Error loading default file {fp}: {e}")
+
+# --- B. HANDLE IMAGES (Uploaded vs Default) ---
 if uploaded_images:
     for img_file in uploaded_images:
         image_dict[img_file.name] = img_file
+elif os.path.exists(DEFAULT_IMAGE_DIR):
+    default_img_paths = glob.glob(os.path.join(DEFAULT_IMAGE_DIR, "*.*"))
+    for img_p in default_img_paths:
+        image_dict[os.path.basename(img_p)] = img_p
 
-# Process uploaded CSVs
-summary_list = []
-data_dict = {}
-
-if uploaded_csvs:
-    for uploaded_csv in uploaded_csvs:
-        stats, raw_df, err = process_vga_uploaded_file(uploaded_csv)
-        if not err:
-            summary_list.append(stats)
-            filename = uploaded_csv.name
-            mall, level, base_name = parse_filename(filename)
-            data_dict[(mall, level)] = {
-                "filename": filename,
-                "base_name": base_name,
-                "df": raw_df
-            }
-
-# Helper to find uploaded images
-def get_uploaded_image(base_name, selected_metric):
+def get_image_display(base_name, selected_metric):
+    """Finds image in dictionary from uploaded or default paths."""
     metric_raw = selected_metric.strip()
     metric_hyphen = metric_raw.replace(" ", "-")
     metric_underscore = metric_raw.replace(" ", "_")
@@ -198,7 +231,9 @@ def get_uploaded_image(base_name, selected_metric):
         f"{base_name}-{metric_hyphen}.png",
         f"{base_name}-{metric_raw}.png",
         f"{base_name}-{metric_underscore}.png",
-        f"{base_name}.png"
+        f"{base_name}.png",
+        f"{base_name}-{metric_hyphen}.jpg",
+        f"{base_name}.jpg"
     ]
     
     for candidate in file_candidates:
@@ -207,7 +242,7 @@ def get_uploaded_image(base_name, selected_metric):
     return None
 
 # -----------------------------------------------------------------------------
-# 3. DASHBOARD UI
+# 4. DASHBOARD UI
 # -----------------------------------------------------------------------------
 if data_dict:
     summary_df = pd.DataFrame(summary_list)
@@ -286,11 +321,11 @@ if data_dict:
 
         with c3:
             st.subheader("VGA Plan Image")
-            img_file = get_uploaded_image(base_name, selected_metric)
-            if img_file:
-                st.image(img_file, caption=f"Loaded: {img_file.name}", use_container_width=True)
+            img_obj = get_image_display(base_name, selected_metric)
+            if img_obj:
+                st.image(img_obj, caption=f"Loaded image for {base_name}", use_container_width=True)
             else:
-                st.info("Upload matching image files in sidebar to view floorplan visual.")
+                st.info("No matching image found.")
 
     # -------------------------------------------------------------------------
     # TAB 2: CROSS-MALL METRIC COMPARISON
@@ -418,11 +453,11 @@ if data_dict:
                         st.pyplot(fig)
 
                     with grid_c3:
-                        img_file = get_uploaded_image(b_name, comp_metric)
-                        if img_file:
-                            st.image(img_file, caption=f"{m_name} {l_name}", use_container_width=True)
+                        img_obj = get_image_display(b_name, comp_metric)
+                        if img_obj:
+                            st.image(img_obj, caption=f"{m_name} {l_name}", use_container_width=True)
                         else:
-                            st.info("Upload matching image files in sidebar to view floorplan visual.")
+                            st.info("No matching image found.")
                     
                     st.divider()
         else:
@@ -443,4 +478,4 @@ if data_dict:
             mime="text/csv"
         )
 else:
-    st.info("👈 Upload CSV file(s) and VGA Images in the sidebar to start analysis.")
+    st.info("👈 Upload custom files or ensure default data files are in the repository folders.")
